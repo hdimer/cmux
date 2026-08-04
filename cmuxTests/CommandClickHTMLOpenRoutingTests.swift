@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import os
 import Testing
 import struct CmuxSettings.AppCatalogSection
 
@@ -12,6 +13,48 @@ import struct CmuxSettings.AppCatalogSection
 @MainActor
 @Suite(.serialized)
 struct CommandClickHTMLOpenRoutingTests {
+    @Test
+    func hoverFilesystemProbePoolRunsOneAndRetainsOnlyLatestPendingJob() {
+        let pool = WordPathHoverFilesystemProbePool(
+            label: "command-hover-probe-test-\(UUID().uuidString)"
+        )
+        let firstStarted = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let secondDiscarded = DispatchSemaphore(value: 0)
+        let thirdFinished = DispatchSemaphore(value: 0)
+        let executed = OSAllocatedUnfairLock(initialState: [Int]())
+
+        pool.submit(.init(
+            id: UUID(),
+            run: {
+                firstStarted.signal()
+                releaseFirst.wait()
+                executed.withLock { $0.append(1) }
+            },
+            discarded: {}
+        ))
+        #expect(firstStarted.wait(timeout: .now() + 1) == .success)
+
+        pool.submit(.init(
+            id: UUID(),
+            run: { executed.withLock { $0.append(2) } },
+            discarded: { secondDiscarded.signal() }
+        ))
+        pool.submit(.init(
+            id: UUID(),
+            run: {
+                executed.withLock { $0.append(3) }
+                thirdFinished.signal()
+            },
+            discarded: {}
+        ))
+
+        #expect(secondDiscarded.wait(timeout: .now() + 1) == .success)
+        releaseFirst.signal()
+        #expect(thirdFinished.wait(timeout: .now() + 1) == .success)
+        #expect(executed.withLock { $0 } == [1, 3])
+    }
+
     @Test
     func hoverCacheIdentityIncludesSurfaceGenerationAndDirectory() {
         let surfaceID = UUID()
