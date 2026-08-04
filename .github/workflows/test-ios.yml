@@ -423,9 +423,31 @@ jobs:
             (
               set +e
               trace_pid=""
+              wait_for_trace_exit() {
+                local steps="$1"
+                local step
+                for step in $(seq 1 "$steps"); do
+                  if ! kill -0 "$trace_pid" >/dev/null 2>&1; then
+                    wait "$trace_pid"
+                    return $?
+                  fi
+                  sleep 0.2
+                done
+                return 124
+              }
               stop_trace() {
                 if [ -n "$trace_pid" ]; then
-                  kill -INT "$trace_pid" >/dev/null 2>&1 || true
+                  if kill -0 "$trace_pid" >/dev/null 2>&1; then
+                    kill -INT "$trace_pid" >/dev/null 2>&1 || true
+                    wait_for_trace_exit 150
+                    if [ "$?" -eq 124 ]; then
+                      kill -TERM "$trace_pid" >/dev/null 2>&1 || true
+                      wait_for_trace_exit 50
+                    fi
+                    if kill -0 "$trace_pid" >/dev/null 2>&1; then
+                      kill -KILL "$trace_pid" >/dev/null 2>&1 || true
+                    fi
+                  fi
                   wait "$trace_pid" 2>/dev/null || true
                   trace_pid=""
                 fi
@@ -450,8 +472,26 @@ jobs:
                     --no-prompt \
                     > "$PROFILE_DIR/record.log" 2>&1 &
                   trace_pid=$!
-                  wait "$trace_pid"
+                  wait_for_trace_exit 750
                   status=$?
+                  if [ "$status" -eq 124 ]; then
+                    echo "profile_watchdog_signal=INT" >> "$PROFILE_DIR/window.txt"
+                    kill -INT "$trace_pid" >/dev/null 2>&1 || true
+                    wait_for_trace_exit 150
+                    status=$?
+                  fi
+                  if [ "$status" -eq 124 ]; then
+                    echo "profile_watchdog_signal=TERM" >> "$PROFILE_DIR/window.txt"
+                    kill -TERM "$trace_pid" >/dev/null 2>&1 || true
+                    wait_for_trace_exit 50
+                    status=$?
+                  fi
+                  if [ "$status" -eq 124 ]; then
+                    echo "profile_watchdog_signal=KILL" >> "$PROFILE_DIR/window.txt"
+                    kill -KILL "$trace_pid" >/dev/null 2>&1 || true
+                    wait "$trace_pid" 2>/dev/null
+                    status=$?
+                  fi
                   trace_pid=""
                   {
                     echo "profile_exit=$status"
@@ -468,6 +508,13 @@ jobs:
           stop_profile_watcher() {
             if [ -n "$PROFILE_WATCH_PID" ]; then
               if kill -0 "$PROFILE_WATCH_PID" >/dev/null 2>&1; then
+                if grep -q '^profile_started_utc=' "$PROFILE_DIR/window.txt" 2>/dev/null; then
+                  # The profiler has its own bounded watchdog. Let it finalize
+                  # the trace after XCTest exits instead of interrupting it.
+                  wait "$PROFILE_WATCH_PID" 2>/dev/null || true
+                  PROFILE_WATCH_PID=""
+                  return
+                fi
                 kill -TERM "$PROFILE_WATCH_PID" >/dev/null 2>&1 || true
               fi
               wait "$PROFILE_WATCH_PID" 2>/dev/null || true
