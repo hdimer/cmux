@@ -713,7 +713,7 @@ jobs:
       ARTIFACT_ID: ${{ inputs.macos_sample_artifact_id }}
       TAG: i499f
       SOURCE_SHA: ${{ inputs.ref }}
-      EXPECTED_APP_COMMIT: 890a64aa1
+      EXPECTED_APP_COMMIT: 1fb5d5a57
     steps:
       - name: Download exact tagged app
         env:
