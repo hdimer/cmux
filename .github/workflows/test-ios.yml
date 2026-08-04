@@ -35,12 +35,18 @@ on:
         required: false
         default: false
         type: boolean
+      macos_sample_artifact_id:
+        description: "Exact macOS reload artifact ID for a stack-sampling fallback"
+        required: false
+        default: ""
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   detect-ios-changes:
+    if: ${{ inputs.macos_sample_artifact_id == '' }}
     runs-on: ${{ vars.LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 5
     outputs:
@@ -86,7 +92,7 @@ jobs:
 
   package-conventions-lint:
     needs: detect-ios-changes
-    if: ${{ needs.detect-ios-changes.outputs.should_lint == 'true' }}
+    if: ${{ inputs.macos_sample_artifact_id == '' && needs.detect-ios-changes.outputs.should_lint == 'true' }}
     runs-on: ${{ vars.LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 5
     steps:
@@ -110,7 +116,7 @@ jobs:
 
   mobile-core-package:
     needs: detect-ios-changes
-    if: ${{ needs.detect-ios-changes.outputs.should_run == 'true' }}
+    if: ${{ inputs.macos_sample_artifact_id == '' && needs.detect-ios-changes.outputs.should_run == 'true' }}
     runs-on: ${{ (!inputs.runner || inputs.runner == 'auto') && (vars.MACOS_RUNNER_IOS || 'blacksmith-6vcpu-macos-26') || inputs.runner }}
     timeout-minutes: 10
     steps:
@@ -186,7 +192,7 @@ jobs:
 
   ios-simulator:
     needs: detect-ios-changes
-    if: ${{ needs.detect-ios-changes.outputs.should_run == 'true' }}
+    if: ${{ inputs.macos_sample_artifact_id == '' && needs.detect-ios-changes.outputs.should_run == 'true' }}
     # Blacksmith, not the bare `macos-26` label (which our self-hosted fleet
     # carries). iOS simulator XCTest runs inside the Simulator, not as a
     # foregrounded Mac app, so the Blacksmith macOS foreground limitation that
@@ -593,7 +599,7 @@ jobs:
       - package-conventions-lint
       - mobile-core-package
       - ios-simulator
-    if: ${{ always() }}
+    if: ${{ always() && inputs.macos_sample_artifact_id == '' }}
     runs-on: ${{ vars.LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 5
     steps:
@@ -630,3 +636,83 @@ jobs:
           for name, data in sorted(needs.items()):
               print(f"{name}={data['result']}")
           PY
+
+  macos-sample:
+    name: exact-pid-macos-sample
+    if: ${{ inputs.macos_sample_artifact_id != '' }}
+    runs-on: blacksmith-6vcpu-macos-26
+    timeout-minutes: 10
+    env:
+      ARTIFACT_ID: ${{ inputs.macos_sample_artifact_id }}
+      TAG: i499f
+      SOURCE_SHA: ${{ inputs.ref }}
+      EXPECTED_APP_COMMIT: 890a64aa1
+    steps:
+      - name: Download exact tagged app
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/reload-artifact" "$RUNNER_TEMP/app" evidence
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/reload-artifact.zip"
+          unzip -q "$RUNNER_TEMP/reload-artifact.zip" -d "$RUNNER_TEMP/reload-artifact"
+          ditto -x -k "$RUNNER_TEMP/reload-artifact/app.zip" "$RUNNER_TEMP/app"
+          app_path="$(find "$RUNNER_TEMP/app" -maxdepth 2 -type d -name '*.app' -print -quit)"
+          test -n "$app_path"
+          app_commit="$(plutil -extract CMUXCommit raw "$app_path/Contents/Info.plist")"
+          test "$app_commit" = "$EXPECTED_APP_COMMIT"
+          printf 'source_sha=%s\nartifact_id=%s\napp_path=%s\napp_commit=%s\n' \
+            "$SOURCE_SHA" "$ARTIFACT_ID" "$app_path" "$app_commit" > evidence/identity.txt
+          plutil -p "$app_path/Contents/Info.plist" > evidence/app-info-plist.txt
+          echo "APP_PATH=$app_path" >> "$GITHUB_ENV"
+
+      - name: Launch and sample activation workload
+        run: |
+          set -euo pipefail
+          socket_path="/tmp/cmux-debug-$TAG.sock"
+          cli_path="$APP_PATH/Contents/Resources/bin/cmux"
+          open -na "$APP_PATH"
+          ready=false
+          for launch_poll in $(seq 1 300); do
+            if "$cli_path" --socket "$socket_path" ping >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          test "$ready" = true
+          target_pid="$(pgrep -n -f "$APP_PATH/Contents/MacOS/cmux DEV")"
+          test -n "$target_pid"
+          printf 'target_pid=%s\nsample_started_utc=%s\n' "$target_pid" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > evidence/sample-window.txt
+          "$cli_path" --socket "$socket_path" identify --json --id-format both > evidence/identify-before.json
+          ps -p "$target_pid" -o pid=,ppid=,etime=,command= > evidence/process-before.txt
+          top -l 1 -pid "$target_pid" -stats pid,cpu,threads,state,time,mem,command > evidence/top-before.txt
+          sample "$target_pid" 15 1 -mayDie -fullPaths -file evidence/i499f-activation.sample.txt > evidence/sample-command.log 2>&1 &
+          sample_pid=$!
+          top -l 12 -s 1 -pid "$target_pid" -stats pid,cpu,threads,state,time,mem,command > evidence/top-series.txt &
+          top_pid=$!
+          sleep 1
+          for activation_index in $(seq 1 10); do
+            printf '%s activation=%s begin\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$activation_index" >> evidence/workload.log
+            "$cli_path" --socket "$socket_path" simulate-app-active >> evidence/workload.log 2>&1
+            "$cli_path" --socket "$socket_path" ping >> evidence/workload.log 2>&1
+            printf '%s activation=%s end\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$activation_index" >> evidence/workload.log
+            sleep 0.75
+          done
+          "$cli_path" --socket "$socket_path" iroh-diag >> evidence/workload.log 2>&1
+          wait "$sample_pid"
+          wait "$top_pid" || true
+          printf 'sample_finished_utc=%s\nsample_exit=0\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> evidence/sample-window.txt
+          test -s evidence/i499f-activation.sample.txt
+          grep -q 'Call graph:' evidence/i499f-activation.sample.txt
+          "$cli_path" --socket "$socket_path" identify --json --id-format both > evidence/identify-after.json
+          kill "$target_pid" 2>/dev/null || true
+
+      - name: Upload exact-PID sample evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-sample-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 7
