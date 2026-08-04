@@ -6502,7 +6502,10 @@ extension SessionPersistenceTests {
             let restoredPanel = try XCTUnwrap(restored.terminalPanel(for: restoredPanelId))
             let startupInput = try XCTUnwrap(restoredPanel.surface.debugInitialInputForTesting())
 
-            XCTAssertNil(restoredPanel.requestedWorkingDirectory)
+            XCTAssertEqual(
+                restoredPanel.requestedWorkingDirectory,
+                FileManager.default.homeDirectoryForCurrentUser.path
+            )
             XCTAssertEqual(
                 startupInput,
                 " \(AgentRestoreLaunch.cliStartupExecutableToken) restore codex session-duplicate-turn\n"
