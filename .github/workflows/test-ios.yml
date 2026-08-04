@@ -387,13 +387,20 @@ jobs:
           fi
           XCODEBUILD_ARGS+=(test)
           VIDEO_PATH="$IOS_DERIVED_DATA/lifecycle-${{ matrix.family }}.mp4"
-          xcrun simctl io "$SIMULATOR_ID" recordVideo \
-            --codec=h264 --force "$VIDEO_PATH" >/dev/null 2>&1 &
-          RECORD_PID=$!
+          RECORD_PID=""
+          start_recording() {
+            local attempt="$1"
+            rm -f "$VIDEO_PATH"
+            xcrun simctl io "$SIMULATOR_ID" recordVideo \
+              --codec=h264 --force "$VIDEO_PATH" \
+              >"$IOS_DERIVED_DATA/logs/recording-${attempt}.log" 2>&1 &
+            RECORD_PID=$!
+          }
           stop_recording() {
-            if kill -0 "$RECORD_PID" >/dev/null 2>&1; then
+            if [ -n "$RECORD_PID" ]; then
               kill -INT "$RECORD_PID" >/dev/null 2>&1 || true
               wait "$RECORD_PID" 2>/dev/null || true
+              RECORD_PID=""
             fi
           }
           trap stop_recording EXIT
@@ -415,13 +422,18 @@ jobs:
             xcrun simctl erase "$SIMULATOR_ID"
             xcrun simctl boot "$SIMULATOR_ID" >/dev/null 2>&1 || true
             xcrun simctl bootstatus "$SIMULATOR_ID" -b
-            if xcodebuild "${XCODEBUILD_ARGS[@]}" 2>&1 | tee "$LOG_PATH"; then
+            start_recording "$attempt"
+            set +e
+            xcodebuild "${XCODEBUILD_ARGS[@]}" 2>&1 | tee "$LOG_PATH"
+            status="${PIPESTATUS[0]}"
+            set -e
+            stop_recording
+            if [ "$status" -eq 0 ]; then
               ./scripts/ci/require_selected_test_execution.sh \
                 "$LOG_PATH" \
                 "${TEST_FILTER:-}"
               exit 0
             fi
-            status="${PIPESTATUS[0]}"
             if selected_tests_passed_despite_xcodebuild_status "$LOG_PATH"; then
               echo "xcodebuild exited $status after XCTest reported the selected tests passed with zero failures; treating this as a runner cleanup failure."
               exit 0
