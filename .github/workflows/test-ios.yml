@@ -30,6 +30,11 @@ on:
           - auto
           - blacksmith-6vcpu-macos-26
           - tart-ios
+      profile_lifecycle:
+        description: "Record a Time Profiler trace during connected lifecycle cold launches"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -368,6 +373,7 @@ jobs:
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.device_family != 'both' && inputs.device_family != matrix.family) }}
         env:
           TEST_FILTER: ${{ inputs.test_filter }}
+          PROFILE_LIFECYCLE: ${{ inputs.profile_lifecycle }}
         run: |
           set -euo pipefail
           XCODEBUILD_ARGS=(
@@ -387,7 +393,10 @@ jobs:
           fi
           XCODEBUILD_ARGS+=(test)
           VIDEO_PATH="$IOS_DERIVED_DATA/lifecycle-${{ matrix.family }}.mp4"
+          PROFILE_DIR="$IOS_DERIVED_DATA/profile"
+          PROFILE_PATH="$PROFILE_DIR/lifecycle-${{ matrix.family }}-cold-launches.trace"
           RECORD_PID=""
+          PROFILE_WATCH_PID=""
           start_recording() {
             local attempt="$1"
             rm -f "$VIDEO_PATH"
@@ -403,7 +412,73 @@ jobs:
               RECORD_PID=""
             fi
           }
-          trap stop_recording EXIT
+          start_profile_watcher() {
+            local log_path="$1"
+            local attempt="$2"
+            if [ "${PROFILE_LIFECYCLE:-false}" != "true" ]; then
+              return
+            fi
+            mkdir -p "$PROFILE_DIR"
+            rm -rf "$PROFILE_PATH"
+            (
+              set +e
+              trace_pid=""
+              stop_trace() {
+                if [ -n "$trace_pid" ]; then
+                  kill -INT "$trace_pid" >/dev/null 2>&1 || true
+                  wait "$trace_pid" 2>/dev/null || true
+                  trace_pid=""
+                fi
+              }
+              trap stop_trace EXIT
+              trap 'stop_trace; exit 143' TERM INT
+              for _ in $(seq 1 1800); do
+                if grep -q "CMUX_LIFECYCLE_READY phase=foreground-10" "$log_path" 2>/dev/null; then
+                  {
+                    echo "profile_attempt=$attempt"
+                    echo "profile_trigger=CMUX_LIFECYCLE_READY phase=foreground-10"
+                    echo "profile_started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                    echo "simulator_id=$SIMULATOR_ID"
+                    echo "simulator_name=$SIMULATOR_NAME"
+                  } > "$PROFILE_DIR/window.txt"
+                  xcrun xctrace record \
+                    --template "Time Profiler" \
+                    --device "$SIMULATOR_ID" \
+                    --all-processes \
+                    --time-limit 120s \
+                    --output "$PROFILE_PATH" \
+                    --no-prompt \
+                    > "$PROFILE_DIR/record.log" 2>&1 &
+                  trace_pid=$!
+                  wait "$trace_pid"
+                  status=$?
+                  trace_pid=""
+                  {
+                    echo "profile_exit=$status"
+                    echo "profile_finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+                  } >> "$PROFILE_DIR/window.txt"
+                  exit 0
+                fi
+                sleep 0.2
+              done
+              echo "profile_trigger_timeout=true" > "$PROFILE_DIR/window.txt"
+            ) &
+            PROFILE_WATCH_PID=$!
+          }
+          stop_profile_watcher() {
+            if [ -n "$PROFILE_WATCH_PID" ]; then
+              if kill -0 "$PROFILE_WATCH_PID" >/dev/null 2>&1; then
+                kill -TERM "$PROFILE_WATCH_PID" >/dev/null 2>&1 || true
+              fi
+              wait "$PROFILE_WATCH_PID" 2>/dev/null || true
+              PROFILE_WATCH_PID=""
+            fi
+          }
+          cleanup_capture() {
+            stop_recording
+            stop_profile_watcher
+          }
+          trap cleanup_capture EXIT
           selected_tests_passed_despite_xcodebuild_status() {
             local log_path="$1"
             # The negative grep must catch BOTH XCTest failure output and Swift
@@ -423,11 +498,13 @@ jobs:
             xcrun simctl boot "$SIMULATOR_ID" >/dev/null 2>&1 || true
             xcrun simctl bootstatus "$SIMULATOR_ID" -b
             start_recording "$attempt"
+            start_profile_watcher "$LOG_PATH" "$attempt"
             set +e
             xcodebuild "${XCODEBUILD_ARGS[@]}" 2>&1 | tee "$LOG_PATH"
             status="${PIPESTATUS[0]}"
             set -e
             stop_recording
+            stop_profile_watcher
             if [ "$status" -eq 0 ]; then
               ./scripts/ci/require_selected_test_execution.sh \
                 "$LOG_PATH" \
@@ -454,6 +531,7 @@ jobs:
             ${{ env.IOS_DERIVED_DATA }}/Logs/Test/*.xcresult
             ${{ env.IOS_DERIVED_DATA }}/logs/*.log
             ${{ env.IOS_DERIVED_DATA }}/lifecycle-${{ matrix.family }}.mp4
+            ${{ env.IOS_DERIVED_DATA }}/profile
           if-no-files-found: error
           retention-days: 7
 
