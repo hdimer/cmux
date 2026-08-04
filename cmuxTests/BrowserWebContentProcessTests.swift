@@ -971,30 +971,36 @@ struct BrowserWebContentProcessTests {
         #expect(NSApp.mainWindow == nil)
 
         let windowsBefore = Set(NSApp.windows.map(ObjectIdentifier.init))
-        var coordinator: BrowserWebAuthnCoordinator? = BrowserWebAuthnCoordinator()
-        let authorizationRequest = ASAuthorizationAppleIDProvider().createRequest()
-        let controller = ASAuthorizationController(authorizationRequests: [authorizationRequest])
-        let anchors = (0..<3).map { _ in
-            coordinator!.presentationAnchor(for: controller)
-        }
-        defer {
-            anchors.forEach {
-                $0.isReleasedWhenClosed = false
-                $0.orderOut(nil)
-                $0.close()
+        weak var retiredCoordinator: BrowserWebAuthnCoordinator?
+        weak var retiredAnchor: NSWindow?
+        var retiredAnchorID: ObjectIdentifier?
+
+        autoreleasepool {
+            let coordinator = BrowserWebAuthnCoordinator()
+            retiredCoordinator = coordinator
+            let authorizationRequest = ASAuthorizationAppleIDProvider().createRequest()
+            let controller = ASAuthorizationController(authorizationRequests: [authorizationRequest])
+            let anchors = (0..<3).map { _ in
+                coordinator.presentationAnchor(for: controller)
             }
+            let newWindows = NSApp.windows.filter {
+                !windowsBefore.contains(ObjectIdentifier($0))
+            }
+            #expect(Set(anchors.map(ObjectIdentifier.init)).count == 1)
+            #expect(newWindows.count == 1)
+            #expect(newWindows.first === anchors.first)
+            #expect(anchors.first?.isVisible == false)
+            #expect(anchors.first?.canBecomeKey == false)
+            #expect(anchors.first?.ignoresMouseEvents == true)
+            #expect(anchors.first?.isExcludedFromWindowsMenu == true)
+
+            retiredAnchor = anchors.first
+            retiredAnchorID = anchors.first.map(ObjectIdentifier.init)
         }
 
-        let newWindows = NSApp.windows.filter {
-            !windowsBefore.contains(ObjectIdentifier($0))
-        }
-        #expect(Set(anchors.map(ObjectIdentifier.init)).count == 1)
-        #expect(newWindows.count == 1)
-        #expect(newWindows.first === anchors.first)
-
-        coordinator = nil
-
-        #expect(!NSApp.windows.contains { $0 === anchors.first })
+        #expect(retiredCoordinator == nil)
+        #expect(retiredAnchor == nil)
+        #expect(!NSApp.windows.contains { retiredAnchorID == ObjectIdentifier($0) })
     }
 
     @Test
