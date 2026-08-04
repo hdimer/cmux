@@ -39,6 +39,14 @@ on:
         description: "Exact macOS reload artifact ID for a stack-sampling fallback"
         required: false
         default: ""
+      focused_package_path:
+        description: "Repository-relative Swift package path for an isolated evidence run"
+        required: false
+        default: ""
+      focused_package_filter:
+        description: "Optional swift test filter for the isolated package evidence run"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -46,7 +54,7 @@ permissions:
 
 jobs:
   detect-ios-changes:
-    if: ${{ inputs.macos_sample_artifact_id == '' }}
+    if: ${{ inputs.macos_sample_artifact_id == '' && inputs.focused_package_path == '' }}
     runs-on: ${{ vars.LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 5
     outputs:
@@ -602,6 +610,51 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  focused-swift-package:
+    name: focused-swift-package
+    if: ${{ inputs.focused_package_path != '' }}
+    runs-on: ${{ (!inputs.runner || inputs.runner == 'auto') && (vars.MACOS_RUNNER_IOS || 'blacksmith-6vcpu-macos-26') || inputs.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          persist-credentials: false
+          submodules: false
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+            xcode_dir="/Applications/Xcode.app/Contents/Developer"
+          else
+            xcode_app="$(find /Applications -maxdepth 1 -type d -name 'Xcode*.app' -print 2>/dev/null | sort | tail -n 1 || true)"
+            test -n "$xcode_app"
+            xcode_dir="$xcode_app/Contents/Developer"
+          fi
+          echo "DEVELOPER_DIR=$xcode_dir" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR="$xcode_dir"
+          xcodebuild -version
+
+      - name: Run focused package tests
+        env:
+          FOCUSED_PACKAGE_PATH: ${{ inputs.focused_package_path }}
+          FOCUSED_PACKAGE_FILTER: ${{ inputs.focused_package_filter }}
+        run: |
+          set -euo pipefail
+          case "$FOCUSED_PACKAGE_PATH" in
+            Packages/*) ;;
+            *) echo "focused package path must stay under Packages/" >&2; exit 2 ;;
+          esac
+          test -f "$FOCUSED_PACKAGE_PATH/Package.swift"
+          test ! -L "$FOCUSED_PACKAGE_PATH"
+          args=(--package-path "$FOCUSED_PACKAGE_PATH")
+          if [ -n "$FOCUSED_PACKAGE_FILTER" ]; then
+            args+=(--filter "$FOCUSED_PACKAGE_FILTER")
+          fi
+          swift test "${args[@]}"
+
   ios-tests:
     name: ios-tests
     # Aggregate gate for this workflow's iOS suites. Add this check to the branch
@@ -613,7 +666,7 @@ jobs:
       - package-conventions-lint
       - mobile-core-package
       - ios-simulator
-    if: ${{ always() && inputs.macos_sample_artifact_id == '' }}
+    if: ${{ always() && inputs.macos_sample_artifact_id == '' && inputs.focused_package_path == '' }}
     runs-on: ${{ vars.LINUX_RUNNER || 'blacksmith-4vcpu-ubuntu-2404' }}
     timeout-minutes: 5
     steps:
@@ -653,7 +706,7 @@ jobs:
 
   macos-sample:
     name: exact-pid-macos-sample
-    if: ${{ inputs.macos_sample_artifact_id != '' }}
+    if: ${{ inputs.macos_sample_artifact_id != '' && inputs.focused_package_path == '' }}
     runs-on: blacksmith-6vcpu-macos-26
     timeout-minutes: 10
     env:
