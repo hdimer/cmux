@@ -337,7 +337,6 @@ function WaitlistBody({
             id="waitlist-email"
             type="email"
             autoComplete="email"
-            autoFocus
             required
             value={email}
             disabled={submitting}
