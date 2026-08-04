@@ -386,6 +386,17 @@ jobs:
             XCODEBUILD_ARGS+=(-skip-testing:cmuxUITests)
           fi
           XCODEBUILD_ARGS+=(test)
+          VIDEO_PATH="$IOS_DERIVED_DATA/lifecycle-${{ matrix.family }}.mp4"
+          xcrun simctl io "$SIMULATOR_ID" recordVideo \
+            --codec=h264 --force "$VIDEO_PATH" >/dev/null 2>&1 &
+          RECORD_PID=$!
+          stop_recording() {
+            if kill -0 "$RECORD_PID" >/dev/null 2>&1; then
+              kill -INT "$RECORD_PID" >/dev/null 2>&1 || true
+              wait "$RECORD_PID" 2>/dev/null || true
+            fi
+          }
+          trap stop_recording EXIT
           selected_tests_passed_despite_xcodebuild_status() {
             local log_path="$1"
             # The negative grep must catch BOTH XCTest failure output and Swift
@@ -421,6 +432,18 @@ jobs:
             fi
             exit "$status"
           done
+
+      - name: Upload selected iOS lifecycle evidence
+        if: ${{ always() && !(github.event_name == 'workflow_dispatch' && inputs.device_family != 'both' && inputs.device_family != matrix.family) }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios-selected-${{ matrix.family }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.IOS_DERIVED_DATA }}/Logs/Test/*.xcresult
+            ${{ env.IOS_DERIVED_DATA }}/logs/*.log
+            ${{ env.IOS_DERIVED_DATA }}/lifecycle-${{ matrix.family }}.mp4
+          if-no-files-found: error
+          retention-days: 7
 
   ios-tests:
     name: ios-tests
