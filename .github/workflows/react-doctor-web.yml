@@ -46,6 +46,7 @@ jobs:
           npm exec --yes --package react-doctor@0.9.4 -- \
             react-doctor web \
             --scope full \
+            --no-cache \
             --json \
             --json-compact \
             --no-score \
