@@ -166,7 +166,7 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/cmux-ios-dd" \
             PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \
             PRODUCT_DISPLAY_NAME="$display_name" \
-            CMUX_GIT_SHA="$(git rev-parse --short HEAD)" \
+            CMUX_GIT_SHA="$(git rev-parse --short=10 HEAD)" \
             CMUX_DEV_TAG="$BUILD_TAG" \
             CMUX_API_BASE_URL="$api_base_url" \
             CMUX_IROH_BROKER_BASE_URL="$iroh_broker_base_url" \
@@ -191,7 +191,7 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/cmux-ios-dd" \
             PRODUCT_BUNDLE_IDENTIFIER="$bundle_id" \
             PRODUCT_DISPLAY_NAME="$display_name" \
-            CMUX_GIT_SHA="$(git rev-parse --short HEAD)" \
+            CMUX_GIT_SHA="$(git rev-parse --short=10 HEAD)" \
             CMUX_DEV_TAG="$BUILD_TAG" \
             CMUX_API_BASE_URL="$api_base_url" \
             CMUX_IROH_BROKER_BASE_URL="$iroh_broker_base_url" \
