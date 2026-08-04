@@ -18,6 +18,7 @@ class BrowserFixtureSocketTestCase: XCTestCase {
     private var diagnosticsPath = ""
     private var launchTag = ""
     private(set) var app: XCUIApplication?
+    private var directlyLaunchedAppProcess: Process?
 
     override func setUp() {
         super.setUp()
@@ -31,7 +32,19 @@ class BrowserFixtureSocketTestCase: XCTestCase {
     }
 
     override func tearDown() {
-        app?.terminate()
+        if let directlyLaunchedAppProcess {
+            directlyLaunchedAppProcess.terminate()
+            for _ in 0..<40 where directlyLaunchedAppProcess.isRunning {
+                usleep(50_000)
+            }
+            if directlyLaunchedAppProcess.isRunning {
+                kill(directlyLaunchedAppProcess.processIdentifier, SIGKILL)
+            }
+            directlyLaunchedAppProcess.waitUntilExit()
+        } else {
+            app?.terminate()
+        }
+        directlyLaunchedAppProcess = nil
         app = nil
         try? FileManager.default.removeItem(atPath: socketPath)
         try? FileManager.default.removeItem(atPath: diagnosticsPath)
@@ -63,27 +76,50 @@ class BrowserFixtureSocketTestCase: XCTestCase {
             app.launchEnvironment["PATH"] = path
         }
         self.app = app
-        // On headless CI runners (no GUI session), XCUIApplication.launch()
-        // blocks ~60s then fails with "Failed to activate application
-        // (current state: Running Background)". Mark this as an expected
-        // failure so the test can continue: these tests are socket-driven and
-        // browser webviews mount in the app windows regardless of activation.
-        let activationOptions = XCTExpectedFailure.Options()
-        activationOptions.isStrict = false
-        XCTExpectFailure("App activation may fail on headless CI runners", options: activationOptions) {
-            app.launch()
-        }
-        if app.state != .runningForeground {
-            XCTAssertTrue(
-                app.state == .runningBackground,
-                "Expected app to be running for browser fixture test. state=\(app.state.rawValue)"
-            )
-        }
+
+        // XCUIApplication.launch() treats foreground activation as mandatory and aborts
+        // the test method when a hosted runner can only run the app in the background.
+        // This base class is exclusively socket-driven, so launch the same built app
+        // binary directly without changing the user's or runner's focus.
+        directlyLaunchedAppProcess = try launchBuiltAppProcess(
+            arguments: app.launchArguments,
+            environment: app.launchEnvironment
+        )
         XCTAssertTrue(
             waitForSocketPong(timeout: 12.0),
             "Expected socket ping at \(socketPath). diagnostics=\(loadDiagnostics())"
         )
         return app
+    }
+
+    private func launchBuiltAppProcess(
+        arguments: [String],
+        environment: [String: String]
+    ) throws -> Process {
+        var searchDirectory = Bundle(for: BrowserFixtureSocketTestCase.self).bundleURL
+        var appURL: URL?
+        while searchDirectory.path != "/" {
+            let candidate = searchDirectory.appendingPathComponent("cmux DEV.app", isDirectory: true)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                appURL = candidate
+                break
+            }
+            searchDirectory.deleteLastPathComponent()
+        }
+
+        let resolvedAppURL = try XCTUnwrap(appURL, "Could not locate the built cmux DEV.app")
+        let executableURL = try XCTUnwrap(
+            Bundle(url: resolvedAppURL)?.executableURL,
+            "Could not locate the built cmux DEV executable"
+        )
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = arguments
+        process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, newValue in newValue }
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        return process
     }
 
 
@@ -182,17 +218,19 @@ class BrowserFixtureSocketTestCase: XCTestCase {
     /// for `document.readyState === "complete"`.
     func openFixture(
         _ fixtureName: String,
+        baseURL: URL? = nil,
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws -> String {
         let surfaceID = try openBrowserSurface(file: file, line: line)
-        let url = Self.fixtureURL(fixtureName)
+        let fixtureURL = Self.fixtureURL(fixtureName)
         XCTAssertTrue(
-            FileManager.default.fileExists(atPath: url.path),
-            "Missing browser fixture: \(url.path)",
+            FileManager.default.fileExists(atPath: fixtureURL.path),
+            "Missing browser fixture: \(fixtureURL.path)",
             file: file,
             line: line
         )
+        let url = baseURL?.appendingPathComponent("\(fixtureName).html") ?? fixtureURL
         try socketResult(
             method: "browser.navigate",
             params: ["surface_id": surfaceID, "url": url.absoluteString],
@@ -692,15 +730,19 @@ final class BrowserFixtureInteractionUITests: BrowserFixtureSocketTestCase {
         XCTAssertEqual(try statusText(surfaceID: sid), "PASS")
     }
 
-    /// Regression: on a page whose CSP has no 'unsafe-eval', the page-world
-    /// callAsyncJavaScript/eval is blocked; automation must fall back to the
-    /// isolated content world (which shares the DOM). Both eval and the
-    /// interaction methods must keep working. A browser.eval served from the
-    /// isolated world must also flag content_world so the agent knows page-world
-    /// JS globals were not visible (the value came from a different JS context).
+    /// Regression: on a page whose CSP has no 'unsafe-eval', browser.eval must
+    /// execute ordinary expressions directly in the page world. Interaction
+    /// methods must keep working on the same strict-CSP page.
     func testCSPNoUnsafeEval() throws {
         try launchApp()
-        let sid = try openFixture("csp-no-unsafe-eval")
+        let server = try BrowserRecoveryHTTPServer(
+            fixtureDirectory: Self.fixtureURL("csp-no-unsafe-eval").deletingLastPathComponent(),
+            strictCSPFixture: "csp-no-unsafe-eval.html"
+        )
+        try server.start()
+        defer { server.stop() }
+        let baseURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(server.port)/"))
+        let sid = try openFixture("csp-no-unsafe-eval", baseURL: baseURL)
 
         let evalResult = try socketResult(
             method: "browser.eval",
@@ -710,12 +752,16 @@ final class BrowserFixtureInteractionUITests: BrowserFixtureSocketTestCase {
         XCTAssertEqual(
             evalResult["value"] as? String,
             "csp-no-unsafe-eval",
-            "browser.eval must succeed under CSP without 'unsafe-eval' (isolated-world fallback)"
+            "browser.eval must succeed under CSP without 'unsafe-eval'"
+        )
+        XCTAssertNil(
+            evalResult["content_world"],
+            "ordinary expressions must retain browser.eval's page-world semantics"
         )
         XCTAssertEqual(
-            evalResult["content_world"] as? String,
-            "isolated",
-            "a CSP-blocked browser.eval served from the isolated world must flag content_world"
+            try evalBool("Array.isArray(window.__cmuxLog)", surfaceID: sid),
+            true,
+            "browser.eval must retain access to page-defined globals under strict CSP"
         )
 
         try socketResult(method: "browser.click", params: ["surface_id": sid, "selector": "#csp-btn"])
