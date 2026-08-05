@@ -4,7 +4,56 @@ import CmuxSidebarProviderKit
 import WebKit
 
 @MainActor
+private final class CmuxExtensionSidebarRowIconView: NSView {
+    private let imageView = NSImageView()
+    private let textLabel = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        imageView.imageScaling = .scaleProportionallyDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        textLabel.alignment = .center
+        textLabel.font = .systemFont(ofSize: 12, weight: .bold)
+        textLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(imageView)
+        addSubview(textLabel)
+        NSLayoutConstraint.activate([
+            imageView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            imageView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            imageView.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.58),
+            imageView.heightAnchor.constraint(equalTo: heightAnchor, multiplier: 0.58),
+            textLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            textLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            textLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(icon: CmuxSidebarProviderIcon) {
+        let foreground = icon.foregroundColorHex.flatMap { NSColor(hex: $0) } ?? .labelColor
+        let background = icon.backgroundColorHex.flatMap { NSColor(hex: $0) }
+            ?? NSColor.labelColor.withAlphaComponent(0.16)
+        layer?.backgroundColor = background.cgColor
+        layer?.cornerRadius = icon.shape == .roundedRectangle ? 5.75 : 12
+        imageView.image = icon.systemImageName.flatMap {
+            NSImage(systemSymbolName: $0, accessibilityDescription: nil)
+        }
+        imageView.contentTintColor = foreground
+        imageView.isHidden = imageView.image == nil
+        textLabel.stringValue = icon.text ?? (imageView.image == nil ? "." : "")
+        textLabel.textColor = foreground
+        textLabel.isHidden = textLabel.stringValue.isEmpty
+    }
+}
+
+@MainActor
 final class CmuxExtensionSidebarWorkspaceRowNativeView: NSView {
+    private let leadingIconView = CmuxExtensionSidebarRowIconView()
     private let primaryLabel = NSTextField(labelWithString: "")
     private let secondaryLabel = NSTextField(labelWithString: "")
     private let trailingLabel = NSTextField(labelWithString: "")
@@ -55,6 +104,7 @@ final class CmuxExtensionSidebarWorkspaceRowNativeView: NSView {
         rowStack.orientation = .horizontal
         rowStack.alignment = .centerY
         rowStack.spacing = 7
+        rowStack.addArrangedSubview(leadingIconView)
         rowStack.addArrangedSubview(textStack)
         rowStack.addArrangedSubview(trailingLabel)
         rowStack.addArrangedSubview(accessoryButton)
@@ -66,6 +116,8 @@ final class CmuxExtensionSidebarWorkspaceRowNativeView: NSView {
             rowStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             rowStack.topAnchor.constraint(equalTo: topAnchor, constant: 7),
             rowStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+            leadingIconView.widthAnchor.constraint(equalToConstant: 24),
+            leadingIconView.heightAnchor.constraint(equalToConstant: 24),
             accessoryButton.widthAnchor.constraint(equalToConstant: 18),
             accessoryButton.heightAnchor.constraint(equalToConstant: 18),
             heightAnchor.constraint(greaterThanOrEqualToConstant: 32),
@@ -100,6 +152,12 @@ final class CmuxExtensionSidebarWorkspaceRowNativeView: NSView {
         secondaryLabel.isHidden = secondaryLabel.stringValue.isEmpty
         trailingLabel.stringValue = rendered(row.trailingText, relativeNow: relativeNow) ?? ""
         trailingLabel.isHidden = trailingLabel.stringValue.isEmpty
+        if let leadingIcon = row.leadingIcon {
+            leadingIconView.update(icon: leadingIcon)
+            leadingIconView.isHidden = false
+        } else {
+            leadingIconView.isHidden = true
+        }
 
         let percent = GlobalFontMagnification.storedPercent
         primaryLabel.font = .systemFont(

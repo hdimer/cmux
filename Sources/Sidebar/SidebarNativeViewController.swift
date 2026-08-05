@@ -36,6 +36,7 @@ final class SidebarNativeViewController: NSViewController {
     private enum MountedContent: Equatable {
         case none
         case workspaceTable
+        case bundledProvider(id: String)
         case installedExtension
         case customSidebar(path: String)
     }
@@ -99,6 +100,7 @@ final class SidebarNativeViewController: NSViewController {
     private var mountedContent: MountedContent = .none
     private weak var mountedContentView: NSView?
     private var tableContainer: SidebarWorkspaceTableContainerView?
+    private var bundledProviderController: SidebarBundledProviderNativeViewController?
     private var installedExtensionController: CMUXInstalledExtensionSidebarHostController?
     private var customSidebarSurface: CustomSidebarSurface?
     private var providerRefreshTask: Task<Void, Never>?
@@ -508,7 +510,7 @@ final class SidebarNativeViewController: NSViewController {
     private func refresh() {
         guard isViewLoaded, isPresentationActive else { return }
         synchronizeSelection()
-        if refreshHostedProviderIfNeeded() {
+        if refreshNonDefaultProviderIfNeeded() {
             footerController.update(
                 tabManager: tabManager,
                 modifierKeyMonitor: modifierKeyMonitor,
@@ -588,7 +590,7 @@ final class SidebarNativeViewController: NSViewController {
         )
     }
 
-    private func refreshHostedProviderIfNeeded() -> Bool {
+    private func refreshNonDefaultProviderIfNeeded() -> Bool {
         if providerID == CmuxExtensionSidebarSelection.hostedExtensionsProviderId {
             refreshInstalledExtension()
             return true
@@ -597,6 +599,10 @@ final class SidebarNativeViewController: NSViewController {
             forProviderId: providerID
         ) {
             refreshCustomSidebar(fileURL: fileURL)
+            return true
+        }
+        if CmuxExtensionSidebarSelection.provider(for: providerID) != nil {
+            refreshBundledProvider()
             return true
         }
         return false
@@ -617,6 +623,45 @@ final class SidebarNativeViewController: NSViewController {
         tableContainer = container
         mountContentView(container)
         mountedContent = .workspaceTable
+    }
+
+    private func refreshBundledProvider() {
+        let controller: SidebarBundledProviderNativeViewController
+        if let existing = bundledProviderController,
+           mountedContent == .bundledProvider(id: providerID) {
+            controller = existing
+        } else {
+            unmountContent()
+            controller = SidebarBundledProviderNativeViewController(
+                providerID: providerID,
+                tabManager: tabManager,
+                onSelectWorkspace: { [weak self] workspaceID in
+                    self?.selectProviderWorkspace(workspaceID)
+                },
+                onNewWorkspace: onNewTab,
+                onNeedsRefresh: { [weak self] in self?.scheduleRefresh() }
+            )
+            bundledProviderController = controller
+            addChild(controller)
+            mountContentView(controller.view)
+            mountedContent = .bundledProvider(id: providerID)
+        }
+        controller.update(
+            snapshot: providerSnapshotFactory.providerSnapshot(),
+            now: Date()
+        )
+        startProviderRefreshTaskIfNeeded(every: .seconds(30))
+    }
+
+    private func selectProviderWorkspace(_ workspaceID: UUID) {
+        guard let workspace = tabManager.tabs.first(where: { $0.id == workspaceID }) else {
+            return
+        }
+        selectedWorkspaceIds = [workspaceID]
+        lastSelectionIndex = tabManager.tabs.firstIndex { $0.id == workspaceID }
+        sidebarSelectionState.selection = .tabs
+        tabManager.selectWorkspace(workspace)
+        scheduleRefresh()
     }
 
     private func refreshInstalledExtension() {
@@ -699,7 +744,7 @@ final class SidebarNativeViewController: NSViewController {
             mountContentView(surface)
             mountedContent = .customSidebar(path: path)
         }
-        startCustomSidebarRefreshTaskIfNeeded()
+        startProviderRefreshTaskIfNeeded(every: .seconds(1))
     }
 
     private var customSidebarContentInsets: CustomSidebarContentInsets {
@@ -709,13 +754,13 @@ final class SidebarNativeViewController: NSViewController {
         )
     }
 
-    private func startCustomSidebarRefreshTaskIfNeeded() {
+    private func startProviderRefreshTaskIfNeeded(every interval: Duration) {
         guard providerRefreshTask == nil else { return }
         let sleep = providerRefreshSleep
         providerRefreshTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 do {
-                    try await sleep(.seconds(1))
+                    try await sleep(interval)
                 } catch {
                     return
                 }
@@ -743,6 +788,12 @@ final class SidebarNativeViewController: NSViewController {
         if let tableContainer {
             tableController.dismantleContainerView(tableContainer)
             self.tableContainer = nil
+        }
+        if let bundledProviderController {
+            bundledProviderController.teardown()
+            bundledProviderController.view.removeFromSuperview()
+            bundledProviderController.removeFromParent()
+            self.bundledProviderController = nil
         }
         if let installedExtensionController {
             installedExtensionController.teardown()
