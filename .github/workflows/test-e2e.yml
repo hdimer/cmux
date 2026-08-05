@@ -36,6 +36,7 @@ on:
           - blacksmith-6vcpu-macos-latest
           - warp-macos-15-arm64-6x
           - depot-macos-latest
+          - depot-macos-26
           - depot-macos-14
           - tart-canary
           - tart-dual
